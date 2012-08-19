@@ -1,0 +1,81 @@
+diff -uN mod_rpaf-0.6.orig/mod_rpaf-2.0.c mod_rpaf-0.6/mod_rpaf-2.0.c
+--- mod_rpaf-0.6.orig/mod_rpaf-2.0.c	2008-01-01 11:05:40.000000000 +0800
++++ mod_rpaf-0.6/mod_rpaf-2.0.c	2008-08-27 14:14:17.000000000 +0800
+@@ -71,9 +71,18 @@
+ #include "http_protocol.h"
+ #include "http_vhost.h"
+ #include "apr_strings.h"
++#include "apr_network_io.h"
+ 
+ module AP_MODULE_DECLARE_DATA rpaf_module;
+ 
++/**
++ * XXX: struct apr_ipsubnet_t is defined in a c file, so we define a 
++ *      wapper struct to shut up compiler's complain
++ */
++typedef struct {
++	apr_ipsubnet_t *ip;
++} proxy_ip_t;
++
+ typedef struct {
+     int                enable;
+     int                sethostname;
+@@ -91,7 +100,7 @@
+     if (!cfg)
+         return NULL;
+ 
+-    cfg->proxy_ips = apr_array_make(p, 0, sizeof(char *));
++    cfg->proxy_ips = apr_array_make(p, 0, sizeof(proxy_ip_t *));
+     cfg->enable = 0;
+     cfg->sethostname = 0;
+ 
+@@ -103,8 +112,23 @@
+     rpaf_server_cfg *cfg = (rpaf_server_cfg *)ap_get_module_config(s->module_config, 
+                                                                    &rpaf_module);
+ 
+-    /* check for valid syntax of ip */
+-    *(char **)apr_array_push(cfg->proxy_ips) = apr_pstrdup(cmd->pool, proxy_ip);
++	proxy_ip_t *p = (proxy_ip_t *)apr_array_push(cfg->proxy_ips);
++	char *where = apr_pstrdup(cmd->pool, proxy_ip);
++	char *delim;
++	char msgbuf[120];
++	apr_status_t rv;
++	if ((delim = ap_strchr(where, '/'))) { /* with a mask */
++		*delim++ = '\0';
++	} else { /* a single ip address */
++		delim = NULL;
++	}
++	rv = apr_ipsubnet_create(&p->ip, where, delim, cmd->pool);
++	if (APR_STATUS_IS_EINVAL(rv)) {
++		return "An IP address w/o mask was expected";
++	} else if (rv != APR_SUCCESS) {
++		apr_strerror(rv, msgbuf, sizeof msgbuf);
++		return apr_pstrdup(cmd->pool, msgbuf);
++	}
+     return NULL;
+ }
+ 
+@@ -135,11 +159,11 @@
+     return NULL;
+ }
+ 
+-static int is_in_array(const char *remote_ip, apr_array_header_t *proxy_ips) {
++static int is_in_array(apr_sockaddr_t *remote_addr, apr_array_header_t *proxy_ips) {
+     int i;
+-    char **list = (char**)proxy_ips->elts;
++    proxy_ip_t *list = (proxy_ip_t *)proxy_ips->elts;
+     for (i = 0; i < proxy_ips->nelts; i++) {
+-        if (strcmp(remote_ip, list[i]) == 0)
++        if (apr_ipsubnet_test(list[i].ip, remote_addr))
+             return 1;
+     }
+     return 0;
+@@ -161,7 +185,7 @@
+     if (!cfg->enable)
+         return DECLINED;
+ 
+-    if (is_in_array(r->connection->remote_ip, cfg->proxy_ips) == 1) {
++    if (is_in_array(r->connection->remote_addr, cfg->proxy_ips)) {
+         /* check if cfg->headername is set and if it is use
+            that instead of X-Forwarded-For by default */
+         if (cfg->headername && (fwdvalue = apr_table_get(r->headers_in, cfg->headername))) {
